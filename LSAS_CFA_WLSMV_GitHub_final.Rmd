@@ -1,0 +1,830 @@
+---
+title: "LSAS-SR Confirmatory and Exploratory Factor Analyses"
+author: "NÖ"
+date: "2026-07-23"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = TRUE, message = FALSE)
+```
+
+## Packages and data
+
+```{r packages-data}
+library(dplyr)
+library(here)
+library(knitr)
+library(lavaan)
+library(psych)
+library(readr)
+library(semTools)
+library(tidyr)
+
+smarvus_dat <- here("data", "smarvus_complete_290723.csv") |>
+  read_csv(
+    show_col_types = FALSE,
+    guess_max = Inf
+  )
+```
+
+## Exclusions and preparation
+
+```{r exclusions}
+lsas_items <- paste0("Q12.1_", 1:24)
+
+smarvus_dat_a <- smarvus_dat |>
+  filter(attention_amnesty == "Yes")
+
+smarvus_dat_b <- smarvus_dat_a |>
+  filter(
+    Q7.1_24 == "1",
+    Q8.1_21 == "5",
+    Q11.1_9 == "3",
+    Q9.1_22 == "1",
+    Q13.1_17 == "2",
+    Q15.1_9 == "4"
+  )
+
+smarvus_dat_all <- smarvus_dat_b |>
+  drop_na(all_of(lsas_items)) |>
+  mutate(across(all_of(lsas_items), as.numeric))
+
+exclusion_summary <- tibble(
+  stage = c(
+    "Initial sample",
+    "Attention amnesty",
+    "Attention checks",
+    "Complete LSAS-SR data"
+  ),
+  n = c(
+    nrow(smarvus_dat),
+    nrow(smarvus_dat_a),
+    nrow(smarvus_dat_b),
+    nrow(smarvus_dat_all)
+  ),
+  excluded_at_stage = c(
+    NA_integer_,
+    nrow(smarvus_dat) - nrow(smarvus_dat_a),
+    nrow(smarvus_dat_a) - nrow(smarvus_dat_b),
+    nrow(smarvus_dat_b) - nrow(smarvus_dat_all)
+  )
+)
+
+kable(exclusion_summary)
+
+# Confirm that parsing issues do not affect variables used in the CFA.
+parsing_issues <- problems(smarvus_dat)
+analysis_variables <- c(
+  lsas_items,
+  "attention_amnesty",
+  "Q7.1_24", "Q8.1_21", "Q11.1_9",
+  "Q9.1_22", "Q13.1_17", "Q15.1_9"
+)
+
+parsing_issues_analysis_variables <- parsing_issues |>
+  mutate(variable = names(smarvus_dat)[col]) |>
+  filter(variable %in% analysis_variables)
+
+stopifnot(nrow(parsing_issues_analysis_variables) == 0L)
+
+# Check that every item has four ordered response categories.
+lapply(smarvus_dat_all[lsas_items], table, useNA = "ifany")
+```
+
+## Demographic summaries
+
+```{r demographics}
+demographic_overview <- tibble(
+  characteristic = c(
+    "Final sample",
+    "Languages",
+    "Countries",
+    "Universities"
+  ),
+  value = c(
+    nrow(smarvus_dat_all),
+    n_distinct(smarvus_dat_all$language, na.rm = TRUE),
+    n_distinct(smarvus_dat_all$country, na.rm = TRUE),
+    n_distinct(smarvus_dat_all$university, na.rm = TRUE)
+  )
+)
+
+summarise_demographic <- function(data, variable) {
+  data |>
+    count({{ variable }}, name = "n", .drop = FALSE) |>
+    mutate(percentage = round(100 * n / sum(n), 2)) |>
+    arrange(desc(n))
+}
+
+language_demographics <- summarise_demographic(smarvus_dat_all, language)
+country_demographics <- summarise_demographic(smarvus_dat_all, country)
+university_demographics <- summarise_demographic(smarvus_dat_all, university)
+gender_demographics <- summarise_demographic(smarvus_dat_all, gender)
+age_demographics <- summarise_demographic(smarvus_dat_all, age)
+
+kable(demographic_overview)
+kable(language_demographics)
+kable(country_demographics)
+kable(university_demographics)
+kable(gender_demographics)
+kable(age_demographics)
+```
+
+## Descriptive statistics using the original 0--3 scoring
+
+The Qualtrics responses are coded 1--4. Subtracting one is needed for score
+descriptives.
+
+```{r descriptives}
+lsas_scored <- smarvus_dat_all |>
+  transmute(across(all_of(lsas_items), ~ .x - 1))
+
+item_descriptives <- tibble(
+  item = lsas_items,
+  mean = vapply(lsas_scored, mean, numeric(1), na.rm = TRUE),
+  sd = vapply(lsas_scored, sd, numeric(1), na.rm = TRUE),
+  minimum = vapply(lsas_scored, min, numeric(1), na.rm = TRUE),
+  maximum = vapply(lsas_scored, max, numeric(1), na.rm = TRUE)
+) |>
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+kable(item_descriptives)
+```
+
+## Model specifications
+
+```{r models}
+liebowitz_model <- '
+Performance =~ Q12.1_1 + Q12.1_2 + Q12.1_3 + Q12.1_4 +
+               Q12.1_6 + Q12.1_8 + Q12.1_9 + Q12.1_13 +
+               Q12.1_14 + Q12.1_16 + Q12.1_17 + Q12.1_20 +
+               Q12.1_21
+
+SocialInteraction =~ Q12.1_5 + Q12.1_7 + Q12.1_10 + Q12.1_11 +
+                     Q12.1_12 + Q12.1_15 + Q12.1_18 + Q12.1_19 +
+                     Q12.1_22 + Q12.1_23 + Q12.1_24
+'
+safren_model <- '
+SocialInteraction =~ Q12.1_5 + Q12.1_7 + Q12.1_10 + Q12.1_11 +
+                     Q12.1_12 + Q12.1_18 + Q12.1_19 + Q12.1_21
+PublicSpeaking =~ Q12.1_2 + Q12.1_6 + Q12.1_15 + Q12.1_16 + Q12.1_20
+Observation =~ Q12.1_1 + Q12.1_9 + Q12.1_13 + Q12.1_17
+EatNDrink =~ Q12.1_3 + Q12.1_4
+'
+
+oakman_model <- '
+SocialInteraction =~ Q12.1_5 + Q12.1_7 + Q12.1_10 + Q12.1_11 +
+                     Q12.1_12 + Q12.1_14 + Q12.1_18 + Q12.1_19 +
+                     Q12.1_21 + Q12.1_22 + Q12.1_23 + Q12.1_24
+PublicSpeaking =~ Q12.1_2 + Q12.1_6 + Q12.1_15 + Q12.1_16 + Q12.1_20
+Observation =~ Q12.1_1 + Q12.1_8 + Q12.1_9 + Q12.1_13 + Q12.1_17
+EatNDrink =~ Q12.1_3 + Q12.1_4
+'
+
+baker_model <- '
+SocialInteraction =~ Q12.1_12 + Q12.1_11 + Q12.1_10 + Q12.1_7 +
+                     Q12.1_5 + Q12.1_19 + Q12.1_18 + Q12.1_21 + Q12.1_14
+NonVerbPerformance =~ Q12.1_17 + Q12.1_9 + Q12.1_8
+Ingestion =~ Q12.1_3 + Q12.1_4
+PublicPerformance =~ Q12.1_20 + Q12.1_6 + Q12.1_16 + Q12.1_15
+Assertiveness =~ Q12.1_13 + Q12.1_22 + Q12.1_24 + Q12.1_1
+'
+```
+
+## Fit all models using WLSMV
+
+The explicit `delta` parameterization is lavaan's default for ordered outcomes.
+It is stated here so that subsequent measurement-invariance analyses can use
+exactly the same settings.
+
+```{r fit-models}
+get_model_items <- function(model_syntax) {
+  lavNames(lavaanify(model_syntax), type = "ov")
+}
+
+fit_wlsmv <- function(model_syntax, data) {
+  cfa(
+    model = model_syntax,
+    data = data,
+    ordered = get_model_items(model_syntax),
+    estimator = "WLSMV",
+    parameterization = "delta",
+    std.lv = TRUE
+  )
+}
+
+liebowitz_fit <- fit_wlsmv(liebowitz_model, smarvus_dat_all)
+safren_fit <- fit_wlsmv(safren_model, smarvus_dat_all)
+oakman_fit <- fit_wlsmv(oakman_model, smarvus_dat_all)
+baker_fit <- fit_wlsmv(baker_model, smarvus_dat_all)
+
+fits <- list(
+  "Liebowitz" = liebowitz_fit,
+  "Safren" = safren_fit,
+  "Oakman" = oakman_fit,
+  "Baker" = baker_fit
+)
+
+convergence_table <- tibble(
+  model = names(fits),
+  converged = vapply(fits, lavInspect, logical(1), what = "converged"),
+  observed_items = vapply(fits, function(x) length(lavNames(x, type = "ov")), integer(1))
+)
+
+kable(convergence_table)
+```
+
+## Model-fit results
+
+WLSMV does not provide likelihood-based AIC or BIC. Models are therefore
+evaluated using robust CFI, robust TLI, robust RMSEA and SRMR. Because Safren
+and Baker omit some items, their fit indices are not strictly comparable with
+those of the 24-item models.
+
+```{r fit-table}
+get_fit_value <- function(fit_values, preferred, fallback = NULL) {
+  if (preferred %in% names(fit_values) && !is.na(fit_values[[preferred]])) {
+    return(unname(fit_values[[preferred]]))
+  }
+  if (!is.null(fallback) && fallback %in% names(fit_values)) {
+    return(unname(fit_values[[fallback]]))
+  }
+  NA_real_
+}
+
+extract_fit <- function(fit, model_name) {
+  fm <- fitMeasures(fit)
+  tibble(
+    model = model_name,
+    n_items = length(lavNames(fit, type = "ov")),
+    chisq = get_fit_value(fm, "chisq.scaled", "chisq"),
+    df = get_fit_value(fm, "df.scaled", "df"),
+    p = get_fit_value(fm, "pvalue.scaled", "pvalue"),
+    cfi = get_fit_value(fm, "cfi.robust", "cfi.scaled"),
+    tli = get_fit_value(fm, "tli.robust", "tli.scaled"),
+    rmsea = get_fit_value(fm, "rmsea.robust", "rmsea.scaled"),
+    rmsea_lower = get_fit_value(fm, "rmsea.ci.lower.robust", "rmsea.ci.lower.scaled"),
+    rmsea_upper = get_fit_value(fm, "rmsea.ci.upper.robust", "rmsea.ci.upper.scaled"),
+    srmr = get_fit_value(fm, "srmr")
+  )
+}
+
+cfa_fit_table <- bind_rows(Map(extract_fit, fits, names(fits)))
+
+cfa_fit_table_report <- cfa_fit_table |>
+  mutate(
+    chisq = round(chisq, 2),
+    df = round(df),
+    p = ifelse(p < .001, "< .001", sprintf("%.3f", p)),
+    across(c(cfi, tli, rmsea, rmsea_lower, rmsea_upper, srmr), ~ round(.x, 3))
+  )
+
+kable(cfa_fit_table_report)
+```
+
+## Standardized loadings
+
+```{r loadings}
+extract_loadings <- function(fit, model_name) {
+  standardizedSolution(fit) |>
+    filter(op == "=~") |>
+    transmute(
+      model = model_name,
+      factor = lhs,
+      item = rhs,
+      loading = est.std,
+      se = se,
+      z = z,
+      p = pvalue
+    )
+}
+
+cfa_loadings <- bind_rows(Map(extract_loadings, fits, names(fits)))
+
+kable(
+  cfa_loadings |>
+    mutate(across(c(loading, se, z), ~ round(.x, 3)))
+)
+```
+
+## Factor correlations
+
+```{r factor-correlations}
+extract_factor_correlations <- function(fit, model_name) {
+  latent_names <- lavNames(fit, type = "lv")
+  standardizedSolution(fit) |>
+    filter(
+      op == "~~",
+      lhs != rhs,
+      lhs %in% latent_names,
+      rhs %in% latent_names
+    ) |>
+    transmute(
+      model = model_name,
+      factor_1 = lhs,
+      factor_2 = rhs,
+      correlation = est.std
+    )
+}
+
+factor_correlations <- bind_rows(
+  Map(extract_factor_correlations, fits, names(fits))
+)
+
+kable(
+  factor_correlations |>
+    mutate(correlation = round(correlation, 3))
+)
+```
+
+## Model-based reliability
+
+```{r reliability}
+## Model-based reliability and Cronbach's alpha
+
+stopifnot(packageVersion("semTools") >= "0.5.9")
+
+# Model-based omega on the observed ordinal response scale
+extract_omega <- function(fit, model_name) {
+
+  result <- semTools::compRelSEM(
+    fit,
+    tau.eq = FALSE,
+    ord.scale = TRUE,
+    obs.var = TRUE
+  )
+
+  tibble(
+    model = model_name,
+    factor = names(result),
+    omega = vapply(
+      result,
+      function(x) as.numeric(x)[1],
+      numeric(1)
+    )
+  )
+}
+
+omega_results <- bind_rows(
+  Map(
+    extract_omega,
+    fits,
+    names(fits)
+  )
+)
+
+# Classical Cronbach's alpha calculated from observed item scores
+cronbach_alpha <- function(data) {
+  item_covariance <- cov(data, use = "complete.obs")
+  number_of_items <- ncol(data)
+
+  number_of_items / (number_of_items - 1) *
+    (1 - sum(diag(item_covariance)) / sum(item_covariance))
+}
+
+extract_alpha <- function(fit, model_name, data) {
+
+  loading_structure <- parameterEstimates(fit) |>
+    filter(op == "=~") |>
+    select(factor = lhs, item = rhs)
+
+  bind_rows(
+    lapply(unique(loading_structure$factor), function(factor_name) {
+
+      factor_items <- loading_structure |>
+        filter(factor == factor_name) |>
+        pull(item)
+
+      tibble(
+        model = model_name,
+        factor = factor_name,
+        alpha = cronbach_alpha(data[factor_items])
+      )
+    })
+  )
+}
+
+alpha_results <- bind_rows(
+  Map(
+    function(fit, model_name) {
+      extract_alpha(
+        fit,
+        model_name,
+        smarvus_dat_all
+      )
+    },
+    fits,
+    names(fits)
+  )
+)
+
+reliability_table <- full_join(
+  omega_results,
+  alpha_results,
+  by = c("model", "factor")
+)
+
+reliability_table_report <- reliability_table |>
+  mutate(
+    omega = round(omega, 3),
+    alpha = round(alpha, 3)
+  )
+
+kable(reliability_table_report)
+```
+
+## Full summaries and diagnostics
+
+```{r summaries}
+lapply(
+  fits,
+  summary,
+  fit.measures = TRUE,
+  standardized = TRUE
+)
+
+# Check residual variances and standardized solutions for inadmissible values.
+lapply(fits, lavInspect, what = "post.check")
+```
+
+## Save reproducible results
+
+```{r save-results}
+results_directory <- here("results")
+dir.create(results_directory, showWarnings = FALSE)
+
+write_csv(exclusion_summary, file.path(results_directory, "exclusion_summary.csv"))
+write_csv(demographic_overview, file.path(results_directory, "demographic_overview.csv"))
+write_csv(language_demographics, file.path(results_directory, "demographics_language.csv"))
+write_csv(country_demographics, file.path(results_directory, "demographics_country.csv"))
+write_csv(university_demographics, file.path(results_directory, "demographics_university.csv"))
+write_csv(gender_demographics, file.path(results_directory, "demographics_gender.csv"))
+write_csv(age_demographics, file.path(results_directory, "demographics_age.csv"))
+write_csv(cfa_fit_table, file.path(results_directory, "WLSMV_CFA_fit_indices.csv"))
+write_csv(cfa_loadings, file.path(results_directory, "WLSMV_CFA_factor_loadings.csv"))
+write_csv(factor_correlations, file.path(results_directory, "WLSMV_factor_correlations.csv"))
+write_csv(item_descriptives, file.path(results_directory, "LSAS_item_descriptives.csv"))
+write_csv(
+  reliability_table,
+  file.path(results_directory, "WLSMV_model_based_reliability.csv")
+)
+
+saveRDS(fits, file.path(results_directory, "WLSMV_CFA_models.rds"))
+
+capture.output(
+  sessionInfo(),
+  file = file.path(results_directory, "sessionInfo.txt")
+)
+```
+
+## Model-comparison note
+
+A formal chi-square difference test was not conducted because the four CFA models were non-nested and did not all include the same observed indicators. The Liebowitz and Oakman models included all 24 LSAS-SR items, whereas the Safren and Baker models included 19 and 22 items, respectively. Each model was therefore evaluated primarily in terms of its absolute fit, and comparisons of fit indices across models were interpreted descriptively. WLSMV chi-square difference testing is appropriate only for nested models fitted to the same observed indicators using the same estimator and ordered-categorical specification.
+
+## Exploratory factor analysis
+
+The EFA was based on polychoric correlations to account for the ordinal
+response format of the LSAS-SR items. The analyses include the preliminary three-factor analysis, the two
+VSS calls, the factor and component parallel analyses based on the precomputed
+polychoric correlation matrix, the later ML parallel analysis, and the final
+eight-factor EFA. The final EFA used the `psych::fa()` defaults of
+minres extraction and oblimin rotation, with ten Berge factor scores.
+
+```{r efa-data-suitability}
+efa_data <- smarvus_dat_all |>
+  dplyr::select(dplyr::all_of(lsas_items))
+
+n_efa <- nrow(efa_data)
+
+# Calculate the polychoric correlation matrix once.
+efa_poly_result <- psych::polychoric(efa_data)
+efa_poly <- efa_poly_result$rho
+
+# Assess whether the correlation matrix is suitable for factor analysis.
+efa_kmo <- psych::KMO(efa_poly)
+
+efa_bartlett <- psych::cortest.bartlett(
+  efa_poly,
+  n = n_efa
+)
+
+efa_suitability <- tibble(
+  overall_kmo = unname(efa_kmo$MSA),
+  minimum_item_kmo = unname(min(efa_kmo$MSAi)),
+  maximum_item_kmo = unname(max(efa_kmo$MSAi)),
+  bartlett_chisq = unname(efa_bartlett$chisq),
+  bartlett_df = unname(efa_bartlett$df),
+  bartlett_p = unname(efa_bartlett$p.value)
+)
+
+kable(
+  efa_suitability |>
+    mutate(across(where(is.numeric), ~ round(.x, 3)))
+)
+```
+
+```{r efa-eigenvalues-scree}
+# Correlation-matrix eigenvalues are used for the scree plot.
+efa_eigenvalues <- eigen(efa_poly)$values
+
+efa_eigenvalue_table <- tibble(
+  factor = seq_along(efa_eigenvalues),
+  eigenvalue = efa_eigenvalues
+)
+
+kable(
+  efa_eigenvalue_table |>
+    mutate(eigenvalue = round(eigenvalue, 3))
+)
+
+plot(
+  seq_along(efa_eigenvalues),
+  efa_eigenvalues,
+  type = "b",
+  pch = 19,
+  xlab = "Factor",
+  ylab = "Eigenvalue",
+  main = "Scree Plot of LSAS-SR Polychoric Correlations"
+)
+
+```
+
+```{r efa-ad-original-approach}
+# Recreate the object names used in the original code.
+cor_dat <- efa_data
+raq_poly <- psych::polychoric(cor_dat)
+raq_cor <- raq_poly$rho
+just_lsas <- smarvus_dat_all |>
+  dplyr::select(dplyr::all_of(lsas_items))
+
+# Preliminary three-factor EFA
+raq_fa <- psych::fa(
+  cor_dat,
+  nfactors = 3,
+  scores = "tenBerge",
+  cor = "poly"
+)
+
+raq_fa
+
+# First ML-based VSS analysis
+efa_output <- psych::vss(
+  just_lsas,
+  fa = "fa",
+  fm = "ml",
+  cor = "poly",
+  SMC = TRUE
+)
+
+efa_output
+
+# Factor and component parallel analyses based on the precomputed
+# polychoric correlation matrix.
+set.seed(20260724)
+
+efa_parallel_factor <- psych::fa.parallel(
+  raq_cor,
+  n.obs = 8338,
+  fa = "fa",
+  cor = "poly"
+)
+
+set.seed(20260724)
+
+efa_parallel_component <- psych::fa.parallel(
+  raq_cor,
+  n.obs = 8338,
+  fa = "pc",
+  cor = "poly"
+)
+
+# Later ML parallel analysis and VSS analysis
+efa_dat_all <- dplyr::select(
+  smarvus_dat_all,
+  dplyr::all_of(lsas_items)
+)
+
+set.seed(20260724)
+
+efa_out_all_1 <- psych::fa.parallel(
+  efa_dat_all,
+  fa = "fa",
+  fm = "ml",
+  cor = "poly",
+  SMC = TRUE,
+  n.iter = 100
+)
+
+efa_out_all_2 <- psych::vss(
+  efa_dat_all,
+  fm = "ml",
+  cor = "poly"
+)
+
+efa_out_all_1
+efa_out_all_2
+
+efa_vss_original_table <- efa_out_all_2$vss.stats |>
+  as.data.frame() |>
+  tibble::rownames_to_column("n_factors")
+
+kable(
+  efa_vss_original_table |>
+    dplyr::select(
+      n_factors,
+      dof,
+      chisq,
+      RMSEA,
+      BIC,
+      SABIC,
+      SRMR
+    ) |>
+    dplyr::mutate(
+      n_factors = as.integer(n_factors),
+      dplyr::across(where(is.numeric), ~ round(.x, 3))
+    )
+)
+
+efa_original_retention_summary <- tibble(
+  analysis = c(
+    "Factor parallel analysis on raq_cor",
+    "Component parallel analysis on raq_cor",
+    "ML factor parallel analysis (SMC = TRUE)",
+    "ML VSS: lowest BIC among 1-8 factors",
+    "ML VSS: lowest SABIC among 1-8 factors"
+  ),
+  suggested_dimensions = c(
+    efa_parallel_factor$nfact,
+    efa_parallel_component$ncomp,
+    efa_out_all_1$nfact,
+    which.min(efa_vss_original_table$BIC),
+    which.min(efa_vss_original_table$SABIC)
+  )
+)
+
+kable(efa_original_retention_summary)
+```
+
+```{r efa-final-model}
+# Final EFA call. Because fm and rotate were not supplied,
+# psych::fa() used minres extraction and oblimin rotation.
+efa_fit <- psych::fa(
+  cor_dat,
+  nfactors = 8,
+  scores = "tenBerge",
+  cor = "poly"
+)
+
+efa_fit
+
+print(
+  efa_fit$loadings,
+  cutoff = 0,
+  digits = 3
+)
+
+efa_variance_explained <- as.data.frame(efa_fit$Vaccounted) |>
+  tibble::rownames_to_column("statistic")
+
+kable(
+  efa_variance_explained |>
+    mutate(across(where(is.numeric), ~ round(.x, 3)))
+)
+```
+
+## EFA loading summary
+
+Salient loadings are defined using the unrounded loading estimates and a
+threshold of \(\lvert\lambda\rvert \ge .32\). Applying the threshold before
+rounding avoids classifying estimates slightly below .32 as salient merely
+because they round to .32.
+
+```{r efa-loading-summary}
+efa_loading_matrix <- unclass(efa_fit$loadings)
+
+efa_loadings <- as.data.frame(efa_loading_matrix) |>
+  tibble::rownames_to_column("item")
+
+efa_primary_loadings <- tibble(
+  item = rownames(efa_loading_matrix),
+  primary_factor = colnames(efa_loading_matrix)[
+    max.col(abs(efa_loading_matrix), ties.method = "first")
+  ],
+  primary_loading = efa_loading_matrix[
+    cbind(
+      seq_len(nrow(efa_loading_matrix)),
+      max.col(abs(efa_loading_matrix), ties.method = "first")
+    )
+  ]
+) |>
+  mutate(
+    absolute_loading = abs(primary_loading),
+    salient = absolute_loading >= .32
+  )
+
+kable(
+  efa_primary_loadings |>
+    mutate(
+      primary_loading = round(primary_loading, 3),
+      absolute_loading = round(absolute_loading, 3)
+    )
+)
+
+efa_cross_loadings <- tibble(
+  item = rownames(efa_loading_matrix),
+  number_salient_loadings = rowSums(abs(efa_loading_matrix) >= .32),
+  cross_loading = number_salient_loadings > 1
+)
+
+kable(efa_cross_loadings)
+
+# Items with no salient loading.
+efa_primary_loadings |>
+  filter(!salient)
+
+# Items assigned to factors using their largest absolute salient loading.
+efa_primary_loadings |>
+  filter(salient) |>
+  arrange(primary_factor, desc(absolute_loading))
+
+# Items with salient loadings on more than one factor.
+efa_cross_loadings |>
+  filter(cross_loading)
+
+efa_factor_correlations <- as.data.frame(efa_fit$Phi) |>
+  tibble::rownames_to_column("factor")
+
+kable(
+  efa_factor_correlations |>
+    mutate(across(where(is.numeric), ~ round(.x, 3)))
+)
+```
+
+## Save EFA results
+
+```{r save-efa-results}
+write_csv(
+  efa_suitability,
+  file.path(results_directory, "EFA_data_suitability.csv")
+)
+
+write_csv(
+  efa_eigenvalue_table,
+  file.path(results_directory, "EFA_correlation_eigenvalues.csv")
+)
+
+write_csv(
+  efa_original_retention_summary,
+  file.path(results_directory, "EFA_AD_retention_summary.csv")
+)
+
+write_csv(
+  efa_variance_explained,
+  file.path(results_directory, "EFA_variance_explained.csv")
+)
+
+write_csv(
+  efa_loadings,
+  file.path(results_directory, "EFA_factor_loadings.csv")
+)
+
+write_csv(
+  efa_primary_loadings,
+  file.path(results_directory, "EFA_primary_loadings.csv")
+)
+
+write_csv(
+  efa_cross_loadings,
+  file.path(results_directory, "EFA_cross_loadings.csv")
+)
+
+write_csv(
+  efa_factor_correlations,
+  file.path(results_directory, "EFA_factor_correlations.csv")
+)
+
+saveRDS(
+  list(
+    preliminary_three_factor_efa = raq_fa,
+    first_vss_ml = efa_output,
+    parallel_analysis_factor = efa_parallel_factor,
+    parallel_analysis_component = efa_parallel_component,
+    parallel_analysis_ml = efa_out_all_1,
+    second_vss_ml = efa_out_all_2,
+    final_eight_factor_efa = efa_fit
+  ),
+  file.path(results_directory, "EFA_models.rds")
+)
+
+# Refresh the reproducibility record after all CFA and EFA analyses.
+capture.output(
+  sessionInfo(),
+  file = file.path(results_directory, "sessionInfo.txt")
+)
+```
